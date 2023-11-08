@@ -22,7 +22,7 @@ class SVGTensor:
 
     class Index:
         COMMAND = 0
-        RADIUS = slice(1, 3)
+        RADIUS = slice(1, 3) # リストや辞書などのシーケンスに対して1~3を取り出す。list[1:3]に同じ。
         X_AXIS_ROT = 3
         LARGE_ARC_FLG = 4
         SWEEP_FLG = 5

@@ -14,6 +14,7 @@ def linear(a, b, x, min_x, max_x):
 
 
 def batchify(data, device):
+    # dataはSVG型
     return (d.unsqueeze(0).to(device) for d in data)
 
 

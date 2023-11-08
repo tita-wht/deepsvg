@@ -30,7 +30,7 @@ class Filling:
     OUTLINE = 0
     FILL = 1
     ERASE = 2
-
+    FILL_AND_OUTLINE = 3 # 追加 outline + fill
 
 class SVGPath:
     def __init__(self, path_commands: List[SVGCommand] = None, origin: Point = None, closed=False, filling=Filling.OUTLINE):
@@ -56,8 +56,12 @@ class SVGPath:
         from .svg_primitive import SVGPathGroup
         return SVGPathGroup([self], *args, **kwargs)
 
-    def set_filling(self, filling=True):
-        self.filling = Filling.FILL if filling else Filling.ERASE
+    def set_filling(self, filling=True, mode=None):
+        # 変更。fillingの追加に適用。mode=Fillng.xxxx
+        if not mode==None:
+            self.filling = mode
+        else:
+            self.filling = Filling.FILL if filling else Filling.ERASE
         return self
 
     def __len__(self):
@@ -85,6 +89,8 @@ class SVGPath:
             elif cmd is not None:
                 yield cmd, list(map(float, FLOAT_RE.findall(x)))
 
+
+    """ load methods / methods about tensors """
     @staticmethod
     def from_xml(x: minidom.Element):
         stroke = x.getAttribute('stroke')
@@ -165,6 +171,8 @@ class SVGPath:
     def to_tensor(self, PAD_VAL=-1):
         return torch.stack([command.to_tensor(PAD_VAL=PAD_VAL) for command in self.all_commands()])
 
+
+    """ write / save / draw mwthods """
     def _get_viz_elements(self, with_points=False, with_handles=False, with_bboxes=False, color_firstlast=False, with_moves=True):
         points = self._get_points_viz(color_firstlast, with_moves) if with_points else ()
         handles = self._get_handles_viz() if with_handles else ()
@@ -190,6 +198,8 @@ class SVGPath:
             handles.extend(command.get_handles_viz())
         return handles
 
+
+    """ methods that manipulate instance vars """
     def _get_unique_geoms(self):
         geoms = []
         for command in self.all_commands():

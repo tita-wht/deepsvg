@@ -8,6 +8,7 @@ import cairosvg
 from PIL import Image
 import io
 import os
+import re
 from moviepy.editor import ImageClip, concatenate_videoclips, ipython_display
 import math
 import random
@@ -18,16 +19,21 @@ Num = Union[int, float]
 from .svg_command import SVGCommandBezier
 from .svg_path import SVGPath, Filling, Orientation
 from .svg_primitive import SVGPathGroup, SVGRectangle, SVGCircle, SVGEllipse, SVGLine, SVGPolyline, SVGPolygon
+from .svg_defs import SVGDefs, SVGStyle
 from .geom import union_bbox
 
+# 全てのSVG()の呼び出しに関して、defsを追加した分を追記する必要がある。
 
 class SVG:
-    def __init__(self, svg_path_groups: List[SVGPathGroup], viewbox: Bbox = None):
+    def __init__(self, svg_path_groups: List[SVGPathGroup], viewbox: Bbox = None, defs: SVGDefs = None):
         if viewbox is None:
             viewbox = Bbox(24)
+        if defs is None:
+            defs = SVGDefs()
 
         self.svg_path_groups = svg_path_groups
         self.viewbox = viewbox
+        self.defs = defs # 追加。<defs>タグの中身のリスト
 
     def __add__(self, other: SVG):
         svg = self.copy()
@@ -62,16 +68,27 @@ class SVG:
     def end_pos(self):
         if not self.svg_path_groups:
             return Point(0.)
-
         return self.svg_path_groups[-1].end_pos
 
-    def copy(self):
-        return SVG([svg_path_group.copy() for svg_path_group in self.svg_path_groups], self.viewbox.copy())
+    @property
+    def style(self):
+        return self.defs.style
 
+    def copy(self):
+        return SVG([svg_path_group.copy() for svg_path_group in self.svg_path_groups], self.viewbox.copy(), self.defs.copy())
+
+
+    """ load methods """
     @staticmethod
     def load_svg(file_path):
         with open(file_path, "r") as f:
             return SVG.from_str(f.read())
+
+    @staticmethod
+    def load_svg_extend(file_path):
+        # 追加。色とgradationの読み込みを可能に。
+        with open(file_path, "r") as f:
+            return SVG.from_str_extend(f.read())
 
     @staticmethod
     def load_splineset(spline_str: str, width, height, add_closing=True):
@@ -136,17 +153,61 @@ class SVG:
             for x in svg_dom.getElementsByTagName(tag):
                 svg_path_groups.append(Primitive.from_xml(x))
 
-        return SVG(svg_path_groups, view_box)
+        return SVG(svg_path_groups, view_box)    
+    
+    # 追加。色・透明度のロード。defsタグ内のロードなどに適用
+    @staticmethod
+    def from_str_extend(svg_str: str):
+        svg_path_groups = []
+        svg_dom = expatbuilder.parseString(svg_str, False)
+        svg_root = svg_dom.getElementsByTagName('svg')[0]
+        if svg_dom.getElementsByTagName("defs").__len__()>0:
+            svg_defs = svg_dom.getElementsByTagName("defs")[0]
+        else:
+            svg_defs = None
 
+        if svg_root.hasAttribute("viewBox"):
+            viewbox_list = list(map(float, re.split(r"[ ,]+", svg_root.getAttribute("viewBox")))) # rは正規表現の意。空白またはカンマが1つ以上連続して続く場合に分割する
+        else:
+            viewbox_list = map(float,[0,0,svg_root.getAttribute("width"),svg_root.getAttribute("height")])
+        view_box = Bbox(*viewbox_list) # p0,p1指定 or x,y,w,hのいずれかで呼び出せるので可変長
+
+        primitives = {
+            "path": SVGPath,
+            "rect": SVGRectangle,
+            "circle": SVGCircle, "ellipse": SVGEllipse,
+            "line": SVGLine,
+            "polyline": SVGPolyline, "polygon": SVGPolygon
+        }
+
+        for tag, Primitive in primitives.items():
+            for x in svg_dom.getElementsByTagName(tag):
+                prim = Primitive.from_xml(x)
+                """ここでprimのcolorを変更する何らかを実行する
+                from_xmlの時点で色の変更ができていた方がコンパクトではある。"""
+                prim.set_all_attrs_from_xml(x)
+                svg_path_groups.append(prim)
+
+        defs = SVGDefs.from_xml(svg_defs)
+
+        return SVG(svg_path_groups=svg_path_groups, viewbox=view_box, defs=defs)
+
+
+    """ methods about tensors """
     def to_tensor(self, concat_groups=True, PAD_VAL=-1):
+        """ 
+        concat_groups: 複数のSVGPathのテンソルを結合するかどうか
+        PAD_VAL: パスの長さがそろっていないときに埋める値
+        """
         group_tensors = [p.to_tensor(PAD_VAL=PAD_VAL) for p in self.svg_path_groups]
 
-        if concat_groups:
+        if concat_groups: 
             return torch.cat(group_tensors, dim=0)
 
         return group_tensors
 
     def to_fillings(self):
+        """ pathのfillingのリスト """
         return [p.path.filling for p in self.svg_path_groups]
 
     @staticmethod
@@ -165,6 +226,8 @@ class SVG:
         svg = SVG([SVGPath.from_tensor(t, allow_empty=allow_empty) for t in tensors], viewbox=viewbox)
         return svg
 
+
+    """ write / save / draw mwthods """
     def save_svg(self, file_path):
         with open(file_path, "w") as f:
             f.write(self.to_str())
@@ -207,11 +270,13 @@ class SVG:
         self.copy().normalize().split_paths().set_color("random").draw(*args, **kwargs)
 
     def __repr__(self):
+        """ インスタンスを文字列で表現する """
         return "SVG[{}](\n{}\n)".format(self.viewbox,
                                         ",\n".join([f"\t{svg_path_group}" for svg_path_group in self.svg_path_groups]))
 
-    def _get_viz_elements(self, with_points=False, with_handles=False, with_bboxes=False, color_firstlast=False,
-                          with_moves=True):
+    def _get_viz_elements(self, with_points=False, with_handles=False, with_bboxes=False, color_firstlast=False, with_moves=True):
+        # viz = visualize, 可視課のための要素の取得
+        # 実際はpointsとhandlesのリストを返す
         viz_elements = []
         for svg_path_group in self.svg_path_groups:
             viz_elements.extend(
@@ -230,12 +295,17 @@ class SVG:
         viz_elements = self._get_viz_elements(with_points, with_handles, with_bboxes, color_firstlast, with_moves)
         newline = "\n"
         return (
-            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{self.viewbox.to_str()}" height="200px" width="200px">'
-            f'{self._markers() if with_markers else ""}'
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{self.viewbox.to_str()}" height="200px" width="200px">\n\n'
+            # f'{self._markers() if with_markers else ""}'
+            f'{self.defs.to_str(with_markers=with_markers)}\n'
             f'{newline.join(svg_path_group.to_str(fill=fill, with_markers=with_markers) for svg_path_group in [*self.svg_path_groups, *viz_elements])}'
+            '\n'
             '</svg>')
 
+
+    """ methods that manipulate instance vars or svg image """
     def _apply_to_paths(self, method, *args, **kwargs):
+        """ methodをself.pass_gropsに適用 """
         for path_group in self.svg_path_groups:
             getattr(path_group, method)(*args, **kwargs)
         return self
@@ -363,6 +433,7 @@ class SVG:
 
         return self
 
+    """ about video / animation """
     def to_video(self, wrapper, color="grey"):
         clips, svg_commands = [], []
 
@@ -485,6 +556,8 @@ class SVG:
             else:
                 c = color
             path_group.color = c
+            path_group.stroke_color = c
+            # たぶんインスタンスの中身はcolor, stroke_colorの両方がc二なっているけど、描画(to_str())の時にfillmode　/ fill の値によって描画されるされないが決まっている。ので、load_xml_extendの後に↑の値を書き換えると描画が不安定になる可能性がある。
         return self
 
     def bbox(self):

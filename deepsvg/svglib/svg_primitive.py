@@ -4,38 +4,73 @@ import torch
 import re
 from typing import List, Union
 from xml.dom import minidom
-from .svg_path import SVGPath
+from .svg_path import SVGPath, Filling
 from .svg_command import SVGCommandLine, SVGCommandArc, SVGCommandBezier, SVGCommandClose
 import shapely
 import shapely.ops
 import shapely.geometry
 import networkx as nx
 
+from .utils import CSS_COLORS
 
 FLOAT_RE = re.compile(r"[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?")
 
-
 def extract_args(args):
     return list(map(float, FLOAT_RE.findall(args)))
-
 
 class SVGPrimitive:
     """
     Reference: https://developer.mozilla.org/en-US/docs/Web/SVG/Tutorial/Basic_Shapes
     """
-    def __init__(self, color="black", fill=False, dasharray=None, stroke_width=".3", opacity=1.0):
+    def __init__(self, color="black", stroke_color="none", fill=False, stroke=False, dasharray=None, stroke_width=".3", opacity="1.0", stroke_opacity="1.0", all_attrs={}, *args, **kwargs):
         self.color = color
+        if not stroke_color == "none":
+            self.stroke_color = stroke_color # 追加
+        else :
+            self.stroke_color = color
         self.dasharray = dasharray
         self.stroke_width = stroke_width
         self.opacity = opacity
+        self.stroke_opacity = stroke_opacity # 追加
+
+        self.all_attrs = all_attrs # その他の属性。辞書(実際にはxmlで指定されるすべての属性が入る)
+        # その他の属性が含まれる場合にto_pathでパスへの近似を行うと元の図形と異なる図形が出力される
 
         self.fill = fill
+        self.stroke = stroke
+        # stroke/fillにより、stroke/fillの有効化が決定される。
+
 
     def _get_fill_attr(self):
-        fill_attr = f'fill="{self.color}" fill-opacity="{self.opacity}"' if self.fill else f'fill="none" stroke="{self.color}" stroke-width="{self.stroke_width}" stroke-opacity="{self.opacity}"'
-        if self.dasharray is not None and not self.fill:
-            fill_attr += f' stroke-dasharray="{self.dasharray}"'
+        # 色関係の属性strを返す        
+        fill_attr = ""
+
+        if self.fill:
+            fill_attr = f'fill="{self.color}" fill-opacity="{self.opacity}" '
+            if self.stroke:
+                fill_attr += f'stroke="{self.stroke_color}" stroke-width="{self.stroke_width}" stroke-opacity="{self.stroke_opacity}" '
+        else:
+            fill_attr = f'fill="none" '
+            if self.stroke:
+                fill_attr += f'stroke="{self.stroke_color}" stroke-width="{self.stroke_width}" stroke-opcity="{self.stroke_opacity}" '
+                
+        if self.dasharray is not None:
+            fill_attr += f'stroke-dasharray="{self.dasharray}" '
+
         return fill_attr
+    
+    def _get_other_attr(self, excludes=[]):
+        # その他の属性strを返す.excludeは無視する属性
+        exclude_attrs = ["fill", "fill-opacity", "stroke", "stroke-opacity", "stroke-width", "opacity", "stroke-dasharray"] # opacityは入れてもいいかも
+        for item in excludes:
+            if item not in exclude_attrs:
+                exclude_attrs.append(item)
+
+        attr = ""
+        for name, value in self.all_attrs.items():
+            if name not in exclude_attrs:
+                attr += f'{name}="{value}" '
+        return attr
 
     @classmethod
     def from_xml(cls, x: minidom.Element):
@@ -61,8 +96,69 @@ class SVGPrimitive:
         self.fill = fill
         return self
 
+    def set_all_attrs_from_xml(self, x: minidom.Element):
+        # 全ての属性を取得する
+        # fillmode による分岐からfill/strokeによる分岐に書き換え
+        attrs = x.attributes
+        all_attrs = {}
+        for name,  value in attrs.items():
+            all_attrs[name] = value
+            if name == "fill":
+                self.color = value
+            if name == "stroke":
+                self.stroke_color = value
+            if name == "stroke-dasharray":
+                self.dasharray = value
+            if name == "opacity":
+                self.opacity = value
+                self.stroke_opacity = value
+            if name == "fill-opacity":
+                self.opacity = value
+            if name == "stroke-opacity":
+                self.stroke_opacity = value
+            if name == "stroke-width":
+                self.stroke_width = value
+        self.all_attrs = all_attrs
+        
+        if "fill" in self.all_attrs or not self.all_attrs["fill"] == "none":
+            self.fill = True
+        else: 
+            self.fill = False
+        if "stroke" in self.all_attrs or not self.all_attrs["stroke"] ==  "none":
+            self.stroke = True
+        else:
+            self.stroke = False
+
+        return self.all_attrs
+
+    def color_rgba(self, fill=True):
+        # 色をrgba値のリストで返す.fillの場合fill、そうでない場合stroke
+        color = self.color if fill else self.stroke_color
+        opacity = self.opacity if fill else self.stroke_opacity
+        if color[0] == "#": # 16進表記
+            r = float.fromhex(color[1:3])
+            g = float.fromhex(color[3:5])
+            b = float.fromhex(color[5:7])
+        elif color[0:3] == "rgb":
+            pat = r"\s*rgb\(([1-9, ]+)\)"
+            rgb = re.findall(pat,color)[0].replace(" ","")
+            rgb = rgb.split(",")
+            r = float(rgb[0][:-1])*256 if rgb[0][-1] == "%" else float(rgb[0])
+            g = float(rgb[1][:-1])*256 if rgb[1][-1] == "%" else float(rgb[1])
+            b = float(rgb[2][:-1])*256 if rgb[2][-1] == "%" else float(rgb[2])
+        elif color.lower() in CSS_COLORS.keys():
+            r = float.fromhex(CSS_COLORS[color.lower()][1:3])
+            g = float.fromhex(CSS_COLORS[color.lower()][3:5])
+            b = float.fromhex(CSS_COLORS[color.lower()][5:7])
+        elif re.match(r"\s*(\S+)\(.+\)", color) in ["hsl","hwb","lch","oklch",";lab","oklab"]:
+            raise NotImplementedError
+
+        a = float(opacity[:-1])*0.01 if opacity[-1]=="%" else float(opacity)
+        return [r,g,b,a]
+
 
 class SVGEllipse(SVGPrimitive):
+    #SVGPrimitiveのコンストラクタの変更に伴いいくつか変更する必要がある。
     def __init__(self, center: Point, radius: Radius, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -74,7 +170,8 @@ class SVGEllipse(SVGPrimitive):
 
     def to_str(self, *args, **kwargs):
         fill_attr = self._get_fill_attr()
-        return f'<ellipse {fill_attr} cx="{self.center.x}" cy="{self.center.y}" rx="{self.radius.x}" ry="{self.radius.y}"/>'
+        other_attr = self._get_other_attr(excludes= ["cx","cy","rx","ry"])
+        return f'<ellipse {fill_attr} cx="{self.center.x}" cy="{self.center.y}" rx="{self.radius.x}" ry="{self.radius.y}" {other_attr}/>'
 
     @classmethod
     def from_xml(_, x: minidom.Element):
@@ -93,7 +190,8 @@ class SVGEllipse(SVGPrimitive):
             SVGCommandArc(p2, self.radius, Angle(0.), Flag(0.), Flag(1.), p3),
             SVGCommandArc(p3, self.radius, Angle(0.), Flag(0.), Flag(1.), p0),
         ]
-        return SVGPath(commands, closed=True).to_group(fill=self.fill)
+        filling = Filling.FILL if self.fill else Filling.OUTLINE
+        return SVGPath(commands, closed=True, filling=filling).to_group(*vars(self))
 
 
 class SVGCircle(SVGEllipse):
@@ -105,7 +203,8 @@ class SVGCircle(SVGEllipse):
 
     def to_str(self, *args, **kwargs):
         fill_attr = self._get_fill_attr()
-        return f'<circle {fill_attr} cx="{self.center.x}" cy="{self.center.y}" r="{self.radius.x}"/>'
+        other_attr = self._get_other_attr(excludes= ["cx","cy","r"])
+        return f'<circle {fill_attr} cx="{self.center.x}" cy="{self.center.y}" r="{self.radius.x}" {other_attr}/>'
 
     @classmethod
     def from_xml(_, x: minidom.Element):
@@ -128,7 +227,8 @@ class SVGRectangle(SVGPrimitive):
 
     def to_str(self, *args, **kwargs):
         fill_attr = self._get_fill_attr()
-        return f'<rect {fill_attr} x="{self.xy.x}" y="{self.xy.y}" width="{self.wh.x}" height="{self.wh.y}"/>'
+        other_attr = self._get_other_attr(excludes= ["x","y","width","height"])
+        return f'<rect {fill_attr} x="{self.xy.x}" y="{self.xy.y}" width="{self.wh.x}" height="{self.wh.y}" {other_attr}/>'
 
     @classmethod
     def from_xml(_, x: minidom.Element):
@@ -150,7 +250,9 @@ class SVGRectangle(SVGPrimitive):
             SVGCommandLine(p2, p3),
             SVGCommandLine(p3, p0)
         ]
-        return SVGPath(commands, closed=True).to_group(fill=self.fill)
+        filling = Filling.FILL if self.fill else Filling.OUTLINE
+
+        return SVGPath(commands, closed=True, filling=filling).to_group(*vars(self))
 
 
 class SVGLine(SVGPrimitive):
@@ -165,7 +267,8 @@ class SVGLine(SVGPrimitive):
 
     def to_str(self, *args, **kwargs):
         fill_attr = self._get_fill_attr()
-        return f'<line {fill_attr} x1="{self.start_pos.x}" y1="{self.start_pos.y}" x2="{self.end_pos.x}" y2="{self.end_pos.y}"/>'
+        other_attr = self._get_other_attr(excludes= ["x1","1y","x2","y2"])
+        return f'<line {fill_attr} x1="{self.start_pos.x}" y1="{self.start_pos.y}" x2="{self.end_pos.x}" y2="{self.end_pos.y}" {other_attr}/>'
 
     @classmethod
     def from_xml(_, x: minidom.Element):
@@ -176,7 +279,8 @@ class SVGLine(SVGPrimitive):
         return SVGLine(start_pos, end_pos, fill=fill)
 
     def to_path(self):
-        return SVGPath([SVGCommandLine(self.start_pos, self.end_pos)]).to_group(fill=self.fill)
+        filling = Filling.FILL if self.fill else Filling.OUTLINE
+        return SVGPath([SVGCommandLine(self.start_pos, self.end_pos)], filling=filling).to_group(*vars(self))
 
 
 class SVGPolyline(SVGPrimitive):
@@ -190,7 +294,8 @@ class SVGPolyline(SVGPrimitive):
 
     def to_str(self, *args, **kwargs):
         fill_attr = self._get_fill_attr()
-        return '<polyline {} points="{}"/>'.format(fill_attr, ' '.join([p.to_str() for p in self.points]))
+        other_attr = self._get_other_attr(excludes= ["points"])
+        return '<polyline {} points="{}" {}/>'.format(fill_attr, ' '.join([p.to_str() for p in self.points], other_attr))
 
     @classmethod
     def from_xml(cls, x: minidom.Element):
@@ -204,7 +309,8 @@ class SVGPolyline(SVGPrimitive):
     def to_path(self):
         commands = [SVGCommandLine(p1, p2) for p1, p2 in zip(self.points[:-1], self.points[1:])]
         is_closed = self.__class__.__name__ == "SVGPolygon"
-        return SVGPath(commands, closed=is_closed).to_group(fill=self.fill)
+        filling = Filling.FILL if self.fill else Filling.OUTLINE
+        return SVGPath(commands, closed=is_closed, filling=filling).to_group(*vars(self))
 
 
 class SVGPolygon(SVGPolyline):
@@ -216,7 +322,8 @@ class SVGPolygon(SVGPolyline):
 
     def to_str(self, *args, **kwargs):
         fill_attr = self._get_fill_attr()
-        return '<polygon {} points="{}"/>'.format(fill_attr, ' '.join([p.to_str() for p in self.points]))
+        other_attr = self._get_other_attr(excludes= ["points"])
+        return '<polygon {} points="{}" {}/>'.format(fill_attr, ' '.join([p.to_str() for p in self.points], other_attr))
 
 
 class SVGPathGroup(SVGPrimitive):
@@ -244,6 +351,7 @@ class SVGPathGroup(SVGPrimitive):
         return len(self.paths)
 
     def total_len(self):
+        # 全てのパスのコマンド数の合計
         return sum([len(path) for path in self.svg_paths])
 
     @property
@@ -267,8 +375,15 @@ class SVGPathGroup(SVGPrimitive):
         self.svg_paths.append(path)
 
     def copy(self):
-        return SVGPathGroup([svg_path.copy() for svg_path in self.svg_paths], self.origin.copy(),
-                            self.color, self.fill, self.dasharray, self.stroke_width, self.opacity)
+        #colorとopacityが同じ変数による定義なのでOUTLINE_modeの時に表示がおかしくなる
+        paths = [svg_path.copy() for svg_path in self.svg_paths]
+        ori = self.origin.copy()
+        attrs = vars(self).copy()
+        del attrs["origin"]
+        del attrs["svg_paths"]
+
+        return SVGPathGroup(paths, ori,
+                            **attrs)
 
     def __repr__(self):
         return "SVGPathGroup({})".format(", ".join(svg_path.__repr__() for svg_path in self.svg_paths))
@@ -293,12 +408,17 @@ class SVGPathGroup(SVGPrimitive):
 
     def to_str(self, with_markers=False, *args, **kwargs):
         fill_attr = self._get_fill_attr()
+        other_attr = self._get_other_attr(excludes= ["filling", "d"])
         marker_attr = 'marker-start="url(#arrow)"' if with_markers else ''
-        return '<path {} {} filling="{}" d="{}"></path>'.format(fill_attr, marker_attr, self.path.filling,
+        return '<path {} {} filling="{}" {} d="{}"></path>'.format(fill_attr, marker_attr, self.path.filling, other_attr,
                                                    " ".join(svg_path.to_str() for svg_path in self.svg_paths))
+        # 最初のpathのfillingで全ての部分に関するfillingが決まるならばSVGPathクラスでfillingを決定するのは多分無駄。というか他のプリミティブに適応的ないのでSVGPrimitive.fillをFillingクラスオブジェクトにするべきなような
 
     def to_tensor(self, PAD_VAL=-1):
-        return torch.cat([p.to_tensor(PAD_VAL=PAD_VAL) for p in self.svg_paths], dim=0)
+        cmd_tensor = torch.cat([p.to_tensor(PAD_VAL=PAD_VAL) for p in self.svg_paths], dim=0)
+        # color_tensor = torch.tensor(self.color_rgba)
+        print(self.color_rgba(self.fill)) ##ここから
+        return cmd_tensor
 
     def _apply_to_paths(self, method, *args, **kwargs):
         for path in self.svg_paths:
@@ -368,7 +488,7 @@ class SVGPathGroup(SVGPrimitive):
 
     def split_paths(self):
         return [SVGPathGroup([svg_path], self.origin,
-                             self.color, self.fill, self.dasharray, self.stroke_width, self.opacity)
+                             self.color, self.stroke_color,self.fill, self.stroke, self.dasharray, self.stroke_width, self.opacity, self.stroke_opacity, self.all_attrs)
                 for svg_path in self.svg_paths]
 
     def split(self, n=None, max_dist=None, include_lines=True):

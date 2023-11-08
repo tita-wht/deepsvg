@@ -11,9 +11,12 @@ class _Config:
         self.num_gpus = num_gpus                              #
 
         self.dataloader_module = "deepsvg.svgtensor_dataset"  #
+        # self.dataloader_module = "deepsvg.svg_dataset"  #
         self.collate_fn = None                                #
         self.data_dir = "./dataset/icons_tensor/"             #
+        # self.data_dir = "./dataset/svgs_simplified/"             #
         self.meta_filepath = "./dataset/icons_meta.csv"       #
+        # self.meta_filepath = "./dataset/svg_meta.csv"       #
         self.loader_num_workers = 0                           #
 
         self.pretrained_path = None                           #

@@ -15,11 +15,13 @@ class SVGCmdEnum(Enum):
     CUBIC_BEZIER = "c"
     CLOSE_PATH = "z"
     ELLIPTIC_ARC = "a"
+    # ↓ SVGTensorで定義されない
     QUAD_BEZIER = "q"
     LINE_TO_HORIZONTAL = "h"
     LINE_TO_VERTICAL = "v"
     CUBIC_BEZIER_REFL = "s"
     QUAD_BEZIER_REFL = "t"
+    # 大文字の場合（絶対座標による指定）がないため不十分。from_strに影響するものと思われる
 
 
 svgCmdArgTypes = {
@@ -49,14 +51,16 @@ class SVGCommand:
 
     @staticmethod
     def from_str(cmd_str: str, args_str: List[Num], pos=None, initial_pos=None, prev_command: SVGCommand = None):
+        # return l, pos, initial_pos
         if pos is None:
             pos = Point(0.)
         if initial_pos is None:
             initial_pos = Point(0.)
 
-        cmd = SVGCmdEnum(cmd_str.lower())
+        cmd = SVGCmdEnum(cmd_str.lower()) # 小文字化（問題ありそう)
 
-        # Implicit MoveTo commands are treated as LineTo
+        # 暗黙的な MoveTo コマンドは LineTo として扱われます
+        # おそらく相対座標の場合の話（解析していないので精度しとけ）
         if cmd is SVGCmdEnum.MOVE_TO and len(args_str) > 2:
             l_cmd_str = SVGCmdEnum.LINE_TO.value
             if cmd_str.isupper():
@@ -210,9 +214,9 @@ class SVGCommandLinear(SVGCommand):
     def to_tensor(self, PAD_VAL=-1):
         cmd_index = SVGTensor.COMMANDS_SIMPLIFIED.index(self.command.value)
         return torch.tensor([cmd_index,
-                             *([PAD_VAL] * 5),
+                             *([PAD_VAL] * 5), # other vars
                              *self.start_pos.to_tensor(),
-                             *([PAD_VAL] * 4),
+                             *([PAD_VAL] * 4), # ctrl pts for vezier
                              *self.end_pos.to_tensor()])
 
     def numericalize(self, n=256):
